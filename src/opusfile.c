@@ -2183,6 +2183,14 @@ int op_raw_seek(OggOpusFile *_of,opus_int64 _pos){
     op_decode_clear(_of);
     cur_link=_of->nlinks-1;
     _of->cur_link=cur_link;
+    /*The EOF path leaves the stream pointing at the previous link's serial
+       number and the decoder uninitialized.
+      Reset the stream to the final link and mark it as set up so that the
+       current-link accessors (op_tags(), op_head(), etc.) report the metadata
+       for the link we actually seeked to, instead of stale data from the first
+       link.*/
+    ogg_stream_reset_serialno(&_of->os,_of->links[cur_link].serialno);
+    _of->ready_state=OP_STREAMSET;
     _of->prev_packet_gp=_of->links[cur_link].pcm_end;
     _of->cur_discard_count=0;
     ret=0;
