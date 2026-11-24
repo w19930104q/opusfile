@@ -131,6 +131,7 @@ typedef struct OpusPictureTag    OpusPictureTag;
 typedef struct OpusServerInfo    OpusServerInfo;
 typedef struct OpusFileCallbacks OpusFileCallbacks;
 typedef struct OggOpusFile       OggOpusFile;
+typedef struct OpusLinkTimeline  OpusLinkTimeline;
 
 /*Warning attributes for libopusfile functions.*/
 # if OP_GNUC_PREREQ(3,4)
@@ -1427,6 +1428,36 @@ void op_free(OggOpusFile *_of);
    Their documention will indicate so explicitly.*/
 /**@{*/
 
+/**The timeline boundaries of a single link in a (possibly-chained) Ogg Opus
+    stream, expressed as PCM sample offsets relative to the start of the whole
+    stream (at the fixed 48 kHz Opus sampling rate).
+   Adjacent links share a boundary: the end sample of one link is the start
+    sample of the next, so the entries form a set of half-open intervals
+    <code>[pcm_start,pcm_end)</code> covering the entire playable stream
+    without gaps or overlaps.
+   All values are computed from information cached while the stream was being
+    opened, so querying them performs no I/O and never moves the underlying
+    stream position.*/
+struct OpusLinkTimeline{
+  /**The index of the link within the chain, in the order the links occur in
+     the stream, starting from 0.*/
+  int          li;
+  /**The number of channels in this link.
+     This is the value returned by op_channel_count() for this link, and may
+     differ between links.*/
+  int          channel_count;
+  /**The PCM offset of the first playable sample of this link, relative to the
+     start of the whole stream.
+     This is equal to the sum of the playable PCM lengths of all preceding
+     links.*/
+  ogg_int64_t  pcm_start;
+  /**The PCM offset one past the last playable sample of this link, relative to
+     the start of the whole stream.
+     The difference <code>pcm_end-pcm_start</code> is equal to the value
+     returned by op_pcm_total() for this link.*/
+  ogg_int64_t  pcm_end;
+};
+
 /**Returns whether or not the stream being read is seekable.
    This is true if
    <ol>
@@ -1523,6 +1554,44 @@ opus_int64 op_raw_total(const OggOpusFile *_of,int _li) OP_ARG_NONNULL(1);
                        \a _li wasn't less than the total number of links in
                        the stream, or the stream was only partially open.*/
 ogg_int64_t op_pcm_total(const OggOpusFile *_of,int _li) OP_ARG_NONNULL(1);
+
+/**Get the complete PCM timeline of every link in a (possibly-chained) Ogg
+    Opus stream in a single call.
+   This returns, for each link, its index, its channel count, and the
+    half-open PCM sample interval <code>[pcm_start,pcm_end)</code> it occupies
+    in the stream as a whole (at the fixed 48 kHz Opus sampling rate).
+   The intervals are reported in link order, are contiguous, and start at 0
+    for the first link, so an application can build the full timeline of the
+    chained stream without querying and accumulating the per-link values
+    itself.
+   Because all the values are computed from the link information cached while
+    the stream was being opened, this function does no I/O, does not change the
+    current link or any buffered decoder state, and never moves the underlying
+    stream position.
+   In particular, it may be called in the middle of playback (or after a seek)
+    without disturbing the data that subsequent calls to op_read_float() and
+    its associated functions will return, and a freshly reopened stream
+    reports exactly the same timeline.
+   The number of entries is the same as op_link_count().
+   You can determine the required array size by calling this function with
+    <code>NULL</code> \a _timeline, or by sizing the array with
+    op_link_count().
+   \param _of The \c OggOpusFile from which to retrieve the timeline.
+   \param _timeline An array of at least \a _nentries OpusLinkTimeline
+                     structures to receive the timeline of each link, or
+                     <code>NULL</code> to just query the number of links.
+   \param _nentries The number of OpusLinkTimeline structures that can be
+                     written to \a _timeline.
+                     This is ignored when \a _timeline is <code>NULL</code>.
+   \return The number of links in the stream (and the number of entries
+            written to \a _timeline when it is non-<code>NULL</code>) on
+            success, or a negative value on error.
+   \retval #OP_EINVAL The stream was only partially open, the stream was not
+                       seekable (so the full link list and its durations are
+                       not known), or \a _nentries was smaller than the total
+                       number of links in the stream.*/
+OP_WARN_UNUSED_RESULT int op_timeline(const OggOpusFile *_of,
+ OpusLinkTimeline *_timeline,int _nentries) OP_ARG_NONNULL(1);
 
 /**Get the ID header information for the given link in a (possibly chained) Ogg
     Opus stream.

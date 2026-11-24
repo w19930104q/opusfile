@@ -1767,6 +1767,39 @@ ogg_int64_t op_pcm_total(const OggOpusFile *_of,int _li){
   return pcm_total+(diff-links[_li].head.pre_skip);
 }
 
+int op_timeline(const OggOpusFile *_of,
+ OpusLinkTimeline *_timeline,int _nentries){
+  OggOpusLink *links;
+  int          nlinks;
+  int          li;
+  nlinks=_of->nlinks;
+  /*The complete timeline is only known once the whole file has been scanned,
+     which only happens for fully-open, seekable streams.
+    Everything we need has already been cached, so this does no I/O and never
+     moves the stream position.*/
+  if(OP_UNLIKELY(_of->ready_state<OP_OPENED)
+   ||OP_UNLIKELY(!_of->seekable)){
+    return OP_EINVAL;
+  }
+  /*A NULL array lets the caller query the number of entries it needs.*/
+  if(_timeline==NULL)return nlinks;
+  if(OP_UNLIKELY(_nentries<nlinks))return OP_EINVAL;
+  links=_of->links;
+  for(li=0;li<nlinks;li++){
+    ogg_int64_t diff;
+    /*The granule position differences and the running total were validated
+       during link enumeration.*/
+    OP_ALWAYS_TRUE(!op_granpos_diff(&diff,
+     links[li].pcm_end,links[li].pcm_start));
+    _timeline[li].li=li;
+    _timeline[li].channel_count=links[li].head.channel_count;
+    _timeline[li].pcm_start=links[li].pcm_file_offset;
+    _timeline[li].pcm_end=
+     links[li].pcm_file_offset+(diff-links[li].head.pre_skip);
+  }
+  return nlinks;
+}
+
 const OpusHead *op_head(const OggOpusFile *_of,int _li){
   if(OP_UNLIKELY(_li>=_of->nlinks))_li=_of->nlinks-1;
   if(!_of->seekable)_li=0;
