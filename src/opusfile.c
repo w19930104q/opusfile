@@ -2092,31 +2092,46 @@ static int op_fetch_and_process_page(OggOpusFile *_of,
         if(OP_UNLIKELY(cur_page_eos)
          &&OP_LIKELY(!op_granpos_diff(&diff,cur_page_gp,prev_packet_gp))
          &&OP_LIKELY(diff<total_duration)){
-          cur_packet_gp=prev_packet_gp;
-          for(pi=0;pi<op_count;pi++){
-            /*Check for overflow.*/
-            if(diff<0&&OP_UNLIKELY(OP_INT64_MAX+diff<durations[pi])){
-              diff=durations[pi]+1;
-            }
-            else diff=durations[pi]-diff;
-            /*If we have samples to trim...*/
+          /*Convert the count of valid samples on this page into a count of
+             samples to trim from the end.
+            A corrupt or wrapped granule position can make the valid count so
+             negative that the trim would not fit in 64 bits: saturate it
+             (this trims everything on the page).*/
+          if(OP_UNLIKELY(diff<0)
+           &&OP_UNLIKELY(OP_INT64_MAX+diff<total_duration)){
+            diff=OP_INT64_MAX;
+          }
+          else diff=total_duration-diff;
+          /*Consume the trim starting from the last packet and working
+             backwards.*/
+          cur_packet_gp=cur_page_gp;
+          for(pi=op_count-1;pi>=0;pi--){
+            /*The number of samples that survive in this packet.*/
+            diff=durations[pi]-diff;
             if(diff>0){
-              /*If we trimmed the entire packet, stop (the spec says encoders
-                 shouldn't do this, but we support it anyway).*/
-              if(OP_UNLIKELY(diff>durations[pi]))break;
-              cur_packet_gp=cur_page_gp;
-              /*Move the EOS flag to this packet, if necessary, so we'll trim
-                 the samples during decode.*/
-              _of->op[pi].e_o_s=1;
+              /*Roll the running granule position back by the surviving
+                 duration.
+                The total surviving duration on this page is at most the
+                 distance back to prev_packet_gp, so this cannot fail.*/
+              OP_ALWAYS_TRUE(!op_granpos_add(&cur_packet_gp,
+               cur_packet_gp,(opus_int32)-diff));
+              /*The trim is now fully accounted for.*/
+              diff=0;
             }
             else{
-              /*Update the granule position as normal.*/
-              OP_ALWAYS_TRUE(!op_granpos_add(&cur_packet_gp,
-               cur_packet_gp,durations[pi]));
+              /*The whole packet is trimmed away.
+                Move the EOS flag to this packet, if necessary, so we'll trim
+                 it during decode, and leave it the granule position of the
+                 packet that follows it.*/
+              _of->op[pi].e_o_s=1;
+              diff=-diff;
             }
             _of->op[pi].granulepos=cur_packet_gp;
-            OP_ALWAYS_TRUE(!op_granpos_diff(&diff,cur_page_gp,cur_packet_gp));
           }
+          /*Keep all of the packets buffered: the fully-trimmed ones decode
+             to zero samples, and dropping them here would mis-count the
+             link.*/
+          pi=op_count;
         }
         else{
           /*Propagate timestamps to earlier packets.
@@ -2888,6 +2903,9 @@ static int op_read_native(OggOpusFile *_of,
             trimmed_duration=(int)OP_MIN(diff,trimmed_duration);
           }
         }
+        /*A corrupt granule position must not be able to produce a negative
+           sample count (which would, e.g., set a negative od_buffer_size).*/
+        trimmed_duration=OP_CLAMP(0,trimmed_duration,duration);
         _of->prev_packet_gp=pop->granulepos;
         if(OP_UNLIKELY(duration*nchannels>_buf_size)){
           op_sample *buf;
