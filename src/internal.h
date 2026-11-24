@@ -191,6 +191,12 @@ struct OggOpusFile{
   opus_int32         cur_discard_count;
   /*The granule position of the previous packet (current packet start time).*/
   ogg_int64_t        prev_packet_gp;
+  /*The PCM offset of the last successfully committed seek, or -1 if no seek
+     has succeeded yet.
+    If a later seek fails, a full seek back to this position restores the
+     framing and decoder state so that playback continues from where it was
+     before the failed seek, instead of from the bisection's stopping point.*/
+  ogg_int64_t        pcm_seek_base;
   /*The stream offset of the most recent page with completed packets, or -1.
     This is only needed to recover continued packet data in the seeking logic,
      when we use the current position as one of our bounds, only to later

@@ -48,3 +48,6 @@ unix/objs
 unix/opusfile_example
 unix/seeking_example
 build
+
+#Local test build output (see tests/build_and_run.sh)
+/.worktmp/

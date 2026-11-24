@@ -1520,6 +1520,8 @@ static int op_open1(OggOpusFile *_of,
   memset(_of,0,sizeof(*_of));
   if(OP_UNLIKELY(_initial_bytes>(size_t)LONG_MAX))return OP_EFAULT;
   _of->end=-1;
+  /*No seek has been committed yet.*/
+  _of->pcm_seek_base=-1;
   _of->stream=_stream;
   _of->callbacks=*_cb;
   /*At a minimum, we need to be able to read data.*/
@@ -2605,52 +2607,31 @@ static int op_pcm_seek_page(OggOpusFile *_of,
   return 0;
 }
 
-int op_pcm_seek(OggOpusFile *_of,ogg_int64_t _pcm_offset){
+/*Perform a full (non-optimized) seek to the given PCM offset.
+  On success, _of->pcm_seek_base is updated to _pcm_offset.
+  This does not attempt to restore any state on failure; the caller is
+   responsible for that.*/
+static int op_pcm_seek_full(OggOpusFile *_of,ogg_int64_t _pcm_offset){
   const OggOpusLink *link;
   ogg_int64_t        pcm_start;
   ogg_int64_t        target_gp;
   ogg_int64_t        prev_packet_gp;
   ogg_int64_t        skip;
   ogg_int64_t        diff;
+  /*The file-relative PCM offset requested by the caller, preserved across
+     the in-place link-relative conversion below so it can be recorded as the
+     rollback position on success.*/
+  ogg_int64_t        file_pcm_offset;
   int                op_count;
   int                op_pos;
   int                ret;
   int                li;
-  if(OP_UNLIKELY(_of->ready_state<OP_OPENED))return OP_EINVAL;
-  if(OP_UNLIKELY(!_of->seekable))return OP_ENOSEEK;
-  if(OP_UNLIKELY(_pcm_offset<0))return OP_EINVAL;
+  file_pcm_offset=_pcm_offset;
   target_gp=op_get_granulepos(_of,_pcm_offset,&li);
   if(OP_UNLIKELY(target_gp==-1))return OP_EINVAL;
   link=_of->links+li;
   pcm_start=link->pcm_start;
   OP_ALWAYS_TRUE(!op_granpos_diff(&_pcm_offset,target_gp,pcm_start));
-#if !defined(OP_SMALL_FOOTPRINT)
-  /*For small (90 ms or less) forward seeks within the same link, just decode
-     forward.
-    This also optimizes the case of seeking to the current position.*/
-  if(li==_of->cur_link&&_of->ready_state>=OP_INITSET){
-    ogg_int64_t gp;
-    gp=_of->prev_packet_gp;
-    if(OP_LIKELY(gp!=-1)){
-      ogg_int64_t discard_count;
-      int         nbuffered;
-      nbuffered=OP_MAX(_of->od_buffer_size-_of->od_buffer_pos,0);
-      OP_ALWAYS_TRUE(!op_granpos_add(&gp,gp,-nbuffered));
-      /*We do _not_ add cur_discard_count to gp.
-        Otherwise the total amount to discard could grow without bound, and it
-         would be better just to do a full seek.*/
-      if(OP_LIKELY(!op_granpos_diff(&discard_count,target_gp,gp))){
-        /*We use a threshold of 90 ms instead of 80, since 80 ms is the
-           _minimum_ we would have discarded after a full seek.
-          Assuming 20 ms frames (the default), we'd discard 90 ms on average.*/
-        if(discard_count>=0&&OP_UNLIKELY(discard_count<90*48)){
-          _of->cur_discard_count=(opus_int32)discard_count;
-          return 0;
-        }
-      }
-    }
-  }
-#endif
   ret=op_pcm_seek_page(_of,target_gp,li);
   if(OP_UNLIKELY(ret<0))return ret;
   /*Now skip samples until we actually get to our target.*/
@@ -2691,6 +2672,68 @@ int op_pcm_seek(OggOpusFile *_of,ogg_int64_t _pcm_offset){
     However, at least op_pcm_tell() will report the correct value immediately
      after returning.*/
   _of->cur_discard_count=(opus_int32)(_pcm_offset-diff);
+  /*Record the original, file-relative target (not the link-relative value
+     _pcm_offset was converted to above).*/
+  _of->pcm_seek_base=file_pcm_offset;
+  return 0;
+}
+
+int op_pcm_seek(OggOpusFile *_of,ogg_int64_t _pcm_offset){
+  ogg_int64_t        pcm_seek_base;
+  ogg_int64_t        target_gp;
+  int                ret;
+  int                li;
+  if(OP_UNLIKELY(_of->ready_state<OP_OPENED))return OP_EINVAL;
+  if(OP_UNLIKELY(!_of->seekable))return OP_ENOSEEK;
+  if(OP_UNLIKELY(_pcm_offset<0))return OP_EINVAL;
+  target_gp=op_get_granulepos(_of,_pcm_offset,&li);
+  if(OP_UNLIKELY(target_gp==-1))return OP_EINVAL;
+#if !defined(OP_SMALL_FOOTPRINT)
+  /*For small (90 ms or less) forward seeks within the same link, just decode
+     forward.
+    This also optimizes the case of seeking to the current position.*/
+  if(li==_of->cur_link&&_of->ready_state>=OP_INITSET){
+    ogg_int64_t gp;
+    gp=_of->prev_packet_gp;
+    if(OP_LIKELY(gp!=-1)){
+      ogg_int64_t discard_count;
+      int         nbuffered;
+      nbuffered=OP_MAX(_of->od_buffer_size-_of->od_buffer_pos,0);
+      OP_ALWAYS_TRUE(!op_granpos_add(&gp,gp,-nbuffered));
+      /*We do _not_ add cur_discard_count to gp.
+        Otherwise the total amount to discard could grow without bound, and it
+         would be better just to do a full seek.*/
+      if(OP_LIKELY(!op_granpos_diff(&discard_count,target_gp,gp))){
+        /*We use a threshold of 90 ms instead of 80, since 80 ms is the
+           _minimum_ we would have discarded after a full seek.
+          Assuming 20 ms frames (the default), we'd discard 90 ms on average.*/
+        if(discard_count>=0&&OP_UNLIKELY(discard_count<90*48)){
+          _of->cur_discard_count=(opus_int32)discard_count;
+          return 0;
+        }
+      }
+    }
+  }
+#endif
+  /*Save the last committed seek position before attempting the new one.
+    A full seek mutates the framing and decoder state as it bisects, so if it
+     fails we must rebuild the state at the old position rather than leave
+     playback at the bisection's stopping point.*/
+  pcm_seek_base=_of->pcm_seek_base;
+  ret=op_pcm_seek_full(_of,_pcm_offset);
+  if(OP_UNLIKELY(ret<0)){
+    if(pcm_seek_base>=0){
+      /*Roll back to the last successfully committed seek position.
+        A full seek rebuilds the framing and decoder state deterministically,
+         so subsequent reads return exactly the same samples they did after
+         the original seek.
+        If the rollback itself fails, nothing sensible can be said about the
+         stream state; report the original error so the error code does not
+         change on retry.*/
+      (void)op_pcm_seek_full(_of,pcm_seek_base);
+    }
+    return ret;
+  }
   return 0;
 }
 
